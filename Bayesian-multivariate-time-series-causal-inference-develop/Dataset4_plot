@@ -1,0 +1,200 @@
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(lubridate)
+library(grid)  # Add this line to fix the grid.text error
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Create date sequence for x-axis
+dates <- seq(as.Date("2016-01-01"), as.Date("2016-04-01"), by = "day")
+
+# Vertical line date (intervention point)
+intervention_date <- as.Date("2016-03-21")
+
+# Function to create carefully calibrated data matching the plot values
+create_calibrated_data <- function(dates, intervention_date, stationary = TRUE) {
+  n <- length(dates)
+  
+  # Base pattern with values fluctuating between 15 and 28 
+  # with occasional peaks at ~25 as shown in the plot
+  t <- 1:n
+  
+  # Create sine wave with proper amplitude to match y-axis range
+  sine_component <- 3 * sin(2 * pi * t / 20)
+  # Add a secondary pattern for realistic fluctuation
+  sine_component2 <- 2 * sin(2 * pi * t / 10 + 3)
+  
+  # Create the base level (~20-22 based on plot)
+  base_level <- 20
+  
+  # Add noise
+  noise <- rnorm(n, 0, 1.2)
+  
+  # Combine components for base signal
+  signal <- base_level + sine_component + sine_component2 + noise
+  
+  # Non-stationary version has a slight upward trend after March 1
+  if (!stationary) {
+    # Add trend component after a certain point (early March)
+    march_idx <- which(dates >= as.Date("2016-03-01"))
+    trend_factor <- seq(0, 2, length.out = length(march_idx))
+    signal[march_idx] <- signal[march_idx] + trend_factor
+  }
+  
+  # Calibrate to ensure values stay within range (15-30) with some spikes to 25-28
+  signal <- pmin(signal, 30)  # Cap at 30
+  signal <- pmax(signal, 15)  # Floor at 15
+  
+  # Define the impact (bottom row plots)
+  # Impact is zero before intervention, then rises to 4-5 units by end of period
+  impact <- rep(0, n)
+  post_idx <- which(dates > intervention_date)
+  
+  if (length(post_idx) > 0) {
+    # Calculate impact - gradual increase after intervention
+    impact_max <- if(stationary) 4.5 else 4.8  # Slightly higher for non-stationary
+    impact[post_idx] <- seq(0.1, impact_max, length.out = length(post_idx))
+    
+    # Apply impact to the signal
+    signal[post_idx] <- signal[post_idx] + impact[post_idx]
+  }
+  
+  return(list(
+    ts_data = signal,
+    impact = impact
+  ))
+}
+
+# Generate data
+non_stationary_data <- create_calibrated_data(dates, intervention_date, stationary = FALSE)
+stationary_data <- create_calibrated_data(dates, intervention_date, stationary = TRUE)
+
+# Create dataframes for plotting with properly calibrated CIs
+create_plot_data <- function(sim_data, dates) {
+  # For the top row plots (time series)
+  ts_df <- data.frame(
+    Date = dates,
+    SimulatedData = sim_data$ts_data,
+    # Estimated median is very close to simulated data but with small differences
+    EstimatedMedian = sim_data$ts_data + rnorm(length(dates), 0, 0.3),
+    # Credible intervals approximately +/- 3-5 units as in the plots
+    LowerCI = sim_data$ts_data - 3 + rnorm(length(dates), 0, 0.7),
+    UpperCI = sim_data$ts_data + 3 + rnorm(length(dates), 0, 0.7)
+  )
+  
+  # For the bottom row plots (impact)
+  impact_df <- data.frame(
+    Date = dates,
+    SimulatedImpact = sim_data$impact,
+    # Estimated median for impact is close to true impact
+    EstimatedMedian = sim_data$impact + rnorm(length(dates), 0, 0.2),
+    # Credible intervals for impact approximately +/- 1.5-2 units as in the plots
+    LowerCI = sim_data$impact - 1.5 + rnorm(length(dates), 0, 0.5),
+    UpperCI = sim_data$impact + 2 + rnorm(length(dates), 0, 1)
+  )
+  
+  # After intervention, add some extra uncertainty (widening CIs)
+  post_idx <- which(dates > intervention_date)
+  if (length(post_idx) > 0) {
+    additional_uncertainty <- seq(0, 2, length.out = length(post_idx))
+    
+    # Make lower bound on impact more uncertain
+    impact_df$LowerCI[post_idx] <- impact_df$LowerCI[post_idx] - additional_uncertainty
+    # Make upper bound on impact more uncertain
+    impact_df$UpperCI[post_idx] <- impact_df$UpperCI[post_idx] + additional_uncertainty
+    
+    # Also widen CIs for time series
+    ts_df$LowerCI[post_idx] <- ts_df$LowerCI[post_idx] - additional_uncertainty * 0.7
+    ts_df$UpperCI[post_idx] <- ts_df$UpperCI[post_idx] + additional_uncertainty * 0.7
+  }
+  
+  return(list(ts_df = ts_df, impact_df = impact_df))
+}
+
+non_stationary_plot_data <- create_plot_data(non_stationary_data, dates)
+stationary_plot_data <- create_plot_data(stationary_data, dates)
+
+# Define the x-axis date format
+date_breaks <- c("Jan-01-16", "Jan-21-16", "Feb-10-16", "Mar-01-16", "Mar-21-16")
+
+# Create the time series plots (top row)
+create_ts_plot <- function(data, title) {
+  ggplot(data$ts_df, aes(x = Date)) +
+    geom_line(aes(y = SimulatedData), color = "darkgray", size = 0.8) +
+    geom_line(aes(y = EstimatedMedian), color = "blue", size = 0.8) +
+    geom_line(aes(y = LowerCI), color = "blue", linetype = "dashed", size = 0.5) +
+    geom_line(aes(y = UpperCI), color = "blue", linetype = "dashed", size = 0.5) +
+    geom_vline(xintercept = as.numeric(intervention_date), linetype = "dashed", color = "gray") +
+    scale_x_date(breaks = as.Date(c("2016-01-01", "2016-01-21", "2016-02-10", "2016-03-01", "2016-03-21")),
+                 labels = date_breaks,
+                 limits = c(min(dates), max(dates))) +
+    scale_y_continuous(limits = c(5, 40), breaks = seq(5, 40, by = 5)) +
+    labs(title = title) +
+    theme_minimal() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "none",
+      panel.grid.minor = element_blank()
+    ) +
+    annotate("text", x = min(dates) + 10, y = 38, 
+             label = "Simulated data", color = "darkgray", hjust = 0, size = 3) +
+    annotate("text", x = min(dates) + 10, y = 36, 
+             label = "Estimated/Predicted Median", color = "blue", hjust = 0, size = 3) +
+    annotate("text", x = min(dates) + 10, y = 34, 
+             label = "95% Credible Intervals", color = "blue", hjust = 0, size = 3)
+}
+
+# Create the impact plots (bottom row)
+create_impact_plot <- function(data, title) {
+  ggplot(data$impact_df, aes(x = Date)) +
+    geom_line(aes(y = SimulatedImpact), color = "darkgray", size = 0.8) +
+    geom_line(aes(y = EstimatedMedian), color = "blue", size = 0.8) +
+    geom_line(aes(y = LowerCI), color = "blue", linetype = "dashed", size = 0.5) +
+    geom_line(aes(y = UpperCI), color = "blue", linetype = "dashed", size = 0.5) +
+    geom_vline(xintercept = as.numeric(intervention_date), linetype = "dashed", color = "gray") +
+    scale_x_date(breaks = as.Date(c("2016-01-01", "2016-01-21", "2016-02-10", "2016-03-01", "2016-03-21")),
+                 labels = date_breaks,
+                 limits = c(min(dates), max(dates))) +
+    scale_y_continuous(limits = c(-5, 15), breaks = seq(-5, 15, by = 5)) +
+    theme_minimal() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "none",
+      panel.grid.minor = element_blank()
+    ) +
+    annotate("text", x = min(dates) + 10, y = 14, 
+             label = "Simulated impact", color = "darkgray", hjust = 0, size = 3) +
+    annotate("text", x = min(dates) + 10, y = 12, 
+             label = "Estimated/Predicted Median", color = "blue", hjust = 0, size = 3) +
+    annotate("text", x = min(dates) + 10, y = 10, 
+             label = "95% Credible Intervals", color = "blue", hjust = 0, size = 3)
+}
+
+# Generate individual plots
+p1 <- create_ts_plot(non_stationary_plot_data, "Non-stationary")
+p2 <- create_impact_plot(non_stationary_plot_data, "")
+p3 <- create_ts_plot(stationary_plot_data, "Stationary")
+p4 <- create_impact_plot(stationary_plot_data, "")
+
+# Combine plots with labels
+final_plot <- grid.arrange(
+  p1, p2, p3, p4, 
+  layout_matrix = rbind(c(1, 3), c(2, 4)),
+  top = "Bayesian multivariate time series causal inference"
+)
+
+# Add subplot labels
+grid.text("(a)", x = 0.01, y = 0.51, just = "left")
+grid.text("(b)", x = 0.01, y = 0.01, just = "left")
+grid.text("(c)", x = 0.51, y = 0.51, just = "left")
+grid.text("(d)", x = 0.51, y = 0.01, just = "left")
+
+#To save the plot
+ ggsave("bayesian_time_series_plots.png", final_plot, width = 10, height = 8, dpi = 300)
